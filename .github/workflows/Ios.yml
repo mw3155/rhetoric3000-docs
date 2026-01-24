@@ -1,20 +1,165 @@
-# This is a basic workflow to help you get started with Actions
+name: iOS Release
 
-name: CI
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
-
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+jobs:
+  build:
+    runs-on: macos-latest
+    
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
-
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build Angular
+        run: npm run build
+      
+      - name: Sync Capacitor
+        run: npx cap sync ios
+      
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      
+      # Install fastlane
+      - name: Install fastlane
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          sudo gem install fastlane -NV
+      
+      - name: Install Apple Certificate and Provisioning Profile
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          
+          # Import certificate
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+          security import $CERTIFICATE_PATH -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          
+          # Install provisioning profile
+          PROFILE_PATH=$RUNNER_TEMP/profile.mobileprovision
+          echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o $PROFILE_PATH
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $PROFILE_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
+      
+      - name: Update Bundle ID and Version
+        run: |
+          cd ios/App/App
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.${{ github.run_number }}" Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Info.plist
+      
+      - name: Build Archive
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cd ios/App
+          
+          # Get the provisioning profile UUID
+          PROFILE_UUID=$(security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision | plutil -extract UUID raw -)
+          
+          xcodebuild -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -archivePath $PWD/build/App.xcarchive \
+            -destination 'generic/platform=iOS' \
+            DEVELOPMENT_TEAM=$APPLE_TEAM_ID \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="Rhetorik3000 App Store Profile" \
+            clean archive
+      
+      - name: Create ExportOptions.plist
+        run: |
+          cat > ios/App/ExportOptions.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>teamID</key>
+            <string>${{ secrets.APPLE_TEAM_ID }}</string>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>uploadBitcode</key>
+            <false/>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>de.mw3155.rhetorik3000</key>
+              <string>Rhetorik3000 App Store Profile</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+      
+      - name: Export Archive
+        run: |
+          cd ios/App
+          xcodebuild -exportArchive \
+            -archivePath $PWD/build/App.xcarchive \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath $PWD/build \
+            -allowProvisioningUpdates
+      
+      # Create App Store Connect API Key JSON
+      - name: Create API Key JSON
+        env:
+          API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_KEY_BASE64 }}
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          # Decode the key
+          mkdir -p ~/private_keys
+          echo -n "$API_KEY_BASE64" | base64 --decode > ~/private_keys/AuthKey_$API_KEY_ID.p8
+          
+          # Create JSON using jq (if available) or ruby
+          if command -v jq &> /dev/null; then
+            jq -n \
+              --arg key_id "$API_KEY_ID" \
+              --arg issuer_id "$API_ISSUER_ID" \
+              --rawfile key ~/private_keys/AuthKey_$API_KEY_ID.p8 \
+              '{key_id: $key_id, issuer_id: $issuer_id, key: $key}' \
+              > ~/api_key.json
+          else
+            ruby -rjson -e "puts JSON.generate({
+              key_id: ENV['API_KEY_ID'],
+              issuer_id: ENV['API_ISSUER_ID'],
+              key: File.read(File.expand_path('~/private_keys/AuthKey_' + ENV['API_KEY_ID'] + '.p8'))
+            })" > ~/api_key.json
+          fi
+
+      # Upload to TestFlight
+      - name: Upload to TestFlight
+        run: |
+          cd ios/App
+          fastlane pilot upload \
+            --ipa "$PWD/build/App.ipa" \
+            --api_key_path ~/api_key.json \
+            --skip_waiting_for_build_processing \
+            --distribute_external \
+            --groups "testers1" \
+            --changelog "Please test this build ${{ github.run_number }}"
