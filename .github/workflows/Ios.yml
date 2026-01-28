@@ -66,12 +66,13 @@ jobs:
           echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o $PROFILE_PATH
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp $PROFILE_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
-      
+
       - name: Update Bundle ID and Version
         run: |
+          BUILD_NUMBER=$(date +%s)
           cd ios/App/App
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.${{ github.run_number }}" Info.plist
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.$BUILD_NUMBER" Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" Info.plist
       
       - name: Build Archive
         env:
