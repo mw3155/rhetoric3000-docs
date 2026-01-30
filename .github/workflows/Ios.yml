@@ -165,4 +165,5 @@ jobs:
             --api_key_path ~/api_key.json \
             --skip_waiting_for_build_processing \
             --distribute_external \
-            --groups "testers1"
+            --groups "testers1" \
+            --changelog ""
