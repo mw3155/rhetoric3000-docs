@@ -165,5 +165,4 @@ jobs:
             --api_key_path ~/api_key.json \
             --skip_waiting_for_build_processing \
             --distribute_external \
-            --groups "testers1" \
-            --changelog "Please test this build ${{ github.run_number }}"
+            --groups "testers1"
