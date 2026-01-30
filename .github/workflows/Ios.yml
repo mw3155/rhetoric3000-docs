@@ -166,4 +166,4 @@ jobs:
             --skip_waiting_for_build_processing \
             --distribute_external \
             --groups "testers1" \
-            --changelog ""
+            --changelog "happy testing"
